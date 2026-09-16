@@ -1,0 +1,11 @@
+# Webshare Free Proxies (Format: IP:PORT:USERNAME:PASSWORD)
+31.59.20.176:6754:jgxafrdt:lk5cy0x4meii
+45.38.107.97:6014:jgxafrdt:lk5cy0x4meii
+198.105.121.200:6462:jgxafrdt:lk5cy0x4meii
+64.137.96.74:6641:jgxafrdt:lk5cy0x4meii
+198.23.243.226:6361:jgxafrdt:lk5cy0x4meii
+38.154.185.97:6370:jgxafrdt:lk5cy0x4meii
+84.247.60.125:6095:jgxafrdt:lk5cy0x4meii
+142.111.67.146:5611:jgxafrdt:lk5cy0x4meii
+191.96.254.138:6185:jgxafrdt:lk5cy0x4meii
+31.58.9.4:6077:jgxafrdt:lk5cy0x4meii
