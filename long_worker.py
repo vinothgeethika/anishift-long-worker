@@ -531,64 +531,8 @@ def download_rpm_sub_api(video_id, work_dir):
             pass
     return None, None
 
-def mux_sinhala_softsub(video_path, sub_path, output_path):
-    """Losslessly muxes Sinhala subtitle (.srt) directly into MKV container with language='sin' and title='සිංහල'.
-    RPMShare automatically detects this track upon upload, displaying 'සිංහල' in the player natively."""
-    if not video_path or not os.path.exists(video_path):
-        return video_path
-    if not sub_path or not os.path.exists(sub_path):
-        return video_path
-
-    # Strategy 1: mkvmerge (industry standard for Matroska, lossless remux in 1-2s)
-    if shutil.which('mkvmerge'):
-        try:
-            log(f"🎬 Muxing Sinhala subtitle into MKV via mkvmerge (track: 'සිංහල', lang: 'sin')...")
-            cmd = [
-                'mkvmerge',
-                '-o', output_path,
-                video_path,
-                '--track-name', '0:සිංහල',
-                '--language', '0:sin',
-                sub_path
-            ]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024 * 1024:
-                log(f"✅ Sinhala soft-sub muxed successfully into {os.path.basename(output_path)}!")
-                return output_path
-            else:
-                log(f"⚠️ mkvmerge notice (code {res.returncode}): {res.stderr[:200]}")
-        except Exception as e:
-            log(f"⚠️ mkvmerge muxing exception: {e}")
-
-    # Strategy 2: ffmpeg fallback
-    if shutil.which('ffmpeg'):
-        try:
-            log("🎬 Muxing Sinhala subtitle into MKV via ffmpeg fallback...")
-            cmd = [
-                'ffmpeg', '-y',
-                '-i', video_path,
-                '-sub_charenc', 'UTF-8',
-                '-i', sub_path,
-                '-map', '0',
-                '-map', '1',
-                '-c', 'copy',
-                '-metadata:s:s:0', 'title=සිංහල',
-                '-metadata:s:s:0', 'language=sin',
-                output_path
-            ]
-            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024 * 1024:
-                log(f"✅ Sinhala soft-sub muxed successfully via ffmpeg into {os.path.basename(output_path)}!")
-                return output_path
-        except Exception as e:
-            log(f"⚠️ ffmpeg muxing exception: {e}")
-
-    log("⚠️ Soft-sub muxing bypassed. Proceeding with original video.")
-    return video_path
-
-def process_episode_subtitles(ep_num, video_path, anime_id, title, work_dir):
-    """Extracts, cleans, translates to Sinhala, and uploads both subs to GitHub Releases (DDL).
-    Returns (si_url, en_url, local_si_path) so the video can be soft-sub muxed prior to upload."""
+def process_episode_subtitles(ep_num, video_path, video_id, anime_id, title, work_dir):
+    """Extracts, cleans, translates to Sinhala, and uploads both subs to GitHub Releases & RPM"""
     log(f"💬 Ep {ep_num} Extracting Subtitles with 125-Line Scoring System...")
     si_src = None
     other_src = None
@@ -596,19 +540,29 @@ def process_episode_subtitles(ep_num, video_path, anime_id, title, work_dir):
     if video_path and os.path.exists(video_path):
         si_src, other_src = extract_sub_from_local_video(video_path, work_dir)
 
+    if not si_src and not other_src and video_id:
+        si_src, other_src = download_rpm_sub_api(video_id, work_dir)
+
     si_url = None
     en_url = None
-    local_si_path = None
     rel_ctx = {}
 
-    # 1. If an existing valid Sinhala sub was discovered in the video
+    # If an existing valid Sinhala sub was discovered
     if si_src:
-        log(f"🎉 Ep {ep_num} Existing Sinhala Sub Found ({si_src})! Uploading to GitHub...")
+        log(f"🎉 Ep {ep_num} Existing Sinhala Sub Found ({si_src})! Uploading directly...")
         si_url = upload_to_github_release(si_src, asset_name="Sinhala.srt", release_context=rel_ctx)
-        local_si_path = si_src
-        log(f"🎉 Ep {ep_num} Sinhala Sub Online: {si_url}")
+        delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
+        attached = upload_sub_to_rpm(
+            video_id, si_src, api_token=API_TOKEN_2, remote_url=si_url,
+            background_if_pending=False, log_prefix=f"[{WORKER_ID} Ep {ep_num}]"
+        )
+        if attached:
+            clear_missing_sub_alert(rtdb, anime_id, ep_num)
+            log(f"🎉 Ep {ep_num} Sinhala Sub Attached to RPM & GitHub: {si_url}")
+        else:
+            log(f"⚠️ Ep {ep_num} Sinhala Sub uploaded to GitHub ({si_url}) but failed to attach to RPM player!")
 
-    # 2. Process English or other source track for Sinhala translation
+    # Process English or other source track for Sinhala translation
     if other_src:
         try:
             en_processed = process_english_sub(other_src, log_prefix=f"[{WORKER_ID} Ep {ep_num}]")
@@ -617,7 +571,7 @@ def process_episode_subtitles(ep_num, video_path, anime_id, title, work_dir):
             if en_url:
                 log(f"✅ Ep {ep_num} English Sub Online: {en_url}")
 
-            if not local_si_path:
+            if not si_url:
                 log(f"🔄 Ep {ep_num} Translating Subtitle to Sinhala (Auto Source Detection)...")
                 out_si_name = os.path.join(work_dir, f"sinhala_{uuid.uuid4().hex[:4]}.srt")
                 si_processed = process_sinhala_sub(
@@ -626,33 +580,38 @@ def process_episode_subtitles(ep_num, video_path, anime_id, title, work_dir):
                     max_workers=5,
                     log_prefix=f"[{WORKER_ID} Ep {ep_num}]"
                 )
-                if si_processed and os.path.exists(si_processed):
+                if si_processed:
                     si_url = upload_to_github_release(si_processed, asset_name="Sinhala.srt", release_context=rel_ctx)
-                    local_si_path = si_processed
-                    log(f"🎉 Ep {ep_num} Sinhala Sub Online: {si_url}")
+                    delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
+                    attached = upload_sub_to_rpm(
+                        video_id, si_processed, api_token=API_TOKEN_2, remote_url=si_url,
+                        background_if_pending=False, log_prefix=f"[{WORKER_ID} Ep {ep_num}]"
+                    )
+                    if attached:
+                        clear_missing_sub_alert(rtdb, anime_id, ep_num)
+                        log(f"🎉 Ep {ep_num} Sinhala Sub Attached to RPM & GitHub: {si_url}")
+                    else:
+                        log(f"⚠️ Ep {ep_num} Sinhala Sub uploaded to GitHub ({si_url}) but failed to attach to RPM player!")
         except Exception as e:
             log(f"⚠️ Subtitle translation/upload error on Ep {ep_num}: {e}")
 
-    if not local_si_path:
+    if not si_url:
         log(f"⚠️ Ep {ep_num} No Sinhala Sub generated. Alerting Admin Panel.")
-        push_missing_sub_alert(rtdb, anime_id, title, ep_num, None, 2)
-    else:
-        clear_missing_sub_alert(rtdb, anime_id, ep_num)
+        push_missing_sub_alert(rtdb, anime_id, title, ep_num, video_id, 2)
 
-    return si_url, en_url, local_si_path
+    return si_url, en_url
 
 # ==========================================
 # ⚡ 5. PARALLEL SINGLE-EPISODE WORKER
 # ==========================================
 def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps, folder_id, anime_id, title, collection_name, db):
-    """Downloads episode, extracts/translates subs, muxes Sinhala into MKV, and uploads to RPMShare"""
+    """Downloads, uploads to RPM, extracts/translates subs, and marks uploaded"""
     ep_dir = os.path.join(BASE_DOWNLOAD_DIR, f"ep_{ep_num:04d}")
     os.makedirs(ep_dir, exist_ok=True)
     uploaded_successfully = False
     video_id = None
     source_used = None
-    si_url = None
-    en_url = None
+    found_video_path = None
 
     try:
         # A. Try Main Magnet
@@ -665,24 +624,14 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
                 f'--dir={ep_dir}', f'--select-file={target["index"]}', main_torrent_file
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            found_video_path = None
             for root, dirs, files in os.walk(ep_dir):
                 if target['name'] in files:
                     found_video_path = os.path.join(root, target['name'])
                     break
 
             if found_video_path and os.path.exists(found_video_path) and os.path.getsize(found_video_path) > 1024 * 1024:
-                # 1. Process and translate subtitles
-                si_url, en_url, local_si_path = process_episode_subtitles(ep_num, found_video_path, anime_id, title, ep_dir)
-
-                # 2. Mux Sinhala soft-sub into MKV before upload!
-                upload_target = found_video_path
-                if local_si_path and os.path.exists(local_si_path):
-                    muxed_path = os.path.join(ep_dir, f"muxed_{os.path.basename(found_video_path)}")
-                    upload_target = mux_sinhala_softsub(found_video_path, local_si_path, muxed_path)
-
-                log(f"🚀 Ep {ep_num} Uploading video (with Sinhala soft-sub) to RPMShare (Server 2)...")
-                video_id = upload_via_tus(upload_target, folder_id, ep_num=ep_num)
+                log(f"🚀 Ep {ep_num} Uploading video to RPMShare (Server 2)...")
+                video_id = upload_via_tus(found_video_path, folder_id, ep_num=ep_num)
                 if video_id:
                     uploaded_successfully = True
                     source_used = "main"
@@ -704,44 +653,34 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
                         f'--dir={ep_dir}', f'--select-file={target["index"]}', b_torrent
                     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-                    found_video_path = None
                     for root, dirs, files in os.walk(ep_dir):
                         if target['name'] in files:
                             found_video_path = os.path.join(root, target['name'])
                             break
 
                     if found_video_path and os.path.exists(found_video_path) and os.path.getsize(found_video_path) > 1024 * 1024:
-                        # 1. Process and translate subtitles
-                        si_url, en_url, local_si_path = process_episode_subtitles(ep_num, found_video_path, anime_id, title, ep_dir)
-
-                        # 2. Mux Sinhala soft-sub into MKV before upload!
-                        upload_target = found_video_path
-                        if local_si_path and os.path.exists(local_si_path):
-                            muxed_path = os.path.join(ep_dir, f"muxed_{os.path.basename(found_video_path)}")
-                            upload_target = mux_sinhala_softsub(found_video_path, local_si_path, muxed_path)
-
-                        log(f"🚀 Ep {ep_num} (Backup #{b_idx+1}) Uploading video (with Sinhala soft-sub) to RPMShare...")
-                        video_id = upload_via_tus(upload_target, folder_id, ep_num=ep_num)
+                        log(f"🚀 Ep {ep_num} (Backup #{b_idx+1}) Uploading video to RPMShare...")
+                        video_id = upload_via_tus(found_video_path, folder_id, ep_num=ep_num)
                         if video_id:
                             uploaded_successfully = True
                             source_used = f"backup_{b_idx+1}"
                             break
 
         if uploaded_successfully and video_id:
+            # 💬 Execute Subtitle Pipeline directly on this episode!
+            si_url, en_url = process_episode_subtitles(ep_num, found_video_path, video_id, anime_id, title, ep_dir)
+
             ep_doc_id = f"episode_{ep_num:04d}"
-            try:
-                db.collection(collection_name).document(str(anime_id)).collection('episodes').document(ep_doc_id).update({
-                    'status': 'uploaded',
-                    'links.rpm_video_id': video_id,
-                    'links.rpm_stream': f"https://rpmshare.com/v/{video_id}",
-                    'server': 2,
-                    'subtitles.sinhala': si_url if si_url else 'embedded',
-                    'subtitles.english': en_url if en_url else 'not_found',
-                    'last_updated': firestore.SERVER_TIMESTAMP
-                })
-            except Exception:
-                pass
-            log(f"✨ Ep {ep_num} 100% COMPLETE! Video ID: {video_id} | Sinhala Sub Muxed & Online: {si_url or 'Embedded'}")
+            db.collection(collection_name).document(str(anime_id)).collection('episodes').document(ep_doc_id).update({
+                'status': 'uploaded',  # Directly marked uploaded with subtitles!
+                'links.rpm_video_id': video_id,
+                'links.rpm_stream': f"https://rpmshare.com/v/{video_id}",
+                'server': 2,
+                'subtitles.sinhala': si_url if si_url else 'not_found',
+                'subtitles.english': en_url if en_url else 'not_found',
+                'last_updated': firestore.SERVER_TIMESTAMP
+            })
+            log(f"✨ Ep {ep_num} 100% COMPLETE! Video ID: {video_id} | Sinhala Sub: {si_url or 'None'}")
             return {'ep_num': ep_num, 'status': 'success', 'video_id': video_id, 'source': source_used}
         else:
             log(f"❌ Ep {ep_num} FAILED across all available magnets.")
