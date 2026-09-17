@@ -19,7 +19,7 @@ jobs:
       - name: Install System Dependencies (aria2 & ffmpeg)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 curl ffmpeg
+          sudo apt-get install -y -qq aria2 curl ffmpeg mkvtoolnix
 
       - name: Setup Python
         uses: actions/setup-python@v5
