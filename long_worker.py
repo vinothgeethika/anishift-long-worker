@@ -269,28 +269,141 @@ def upload_via_tus(file_path, folder_id):
 # ==========================================
 # 💬 4. SUBTITLE EXTRACTION & PIPELINE
 # ==========================================
+# ==========================================
+# 💬 4. SUBTITLE EXTRACTION & PIPELINE
+# ==========================================
 def extract_sub_from_local_video(video_path, work_dir):
-    """Extracts embedded subtitle track from local MKV/MP4 using ffmpeg"""
+    """Extracts all embedded subtitle tracks from local MKV/MP4 using ffprobe & ffmpeg,
+    scores each track using the 125-line threshold & language weighting system,
+    and returns (winner_si_path, winner_other_path)."""
     try:
-        out_srt = os.path.join(work_dir, f"local_sub_{uuid.uuid4().hex[:4]}.srt")
-        cmd = [
-            'ffmpeg', '-y', '-i', video_path,
-            '-map', '0:s:0',
-            '-c:s', 'srt',
-            out_srt
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.exists(out_srt) and os.path.getsize(out_srt) > 1000:
-            if is_valid_sub_file(out_srt):
-                return out_srt
-            else:
-                os.remove(out_srt)
+        streams = []
+        try:
+            probe_cmd = [
+                'ffprobe', '-v', 'error',
+                '-select_streams', 's',
+                '-show_entries', 'stream=index:stream_tags=language,title',
+                '-of', 'json', video_path
+            ]
+            res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=25)
+            if res.returncode == 0:
+                p_data = json.loads(res.stdout)
+                streams = p_data.get('streams', [])
+        except Exception:
+            pass
+
+        if not streams:
+            streams = [{'index': f"s:{i}", 'tags': {'title': f"Track {i}"}} for i in range(6)]
+
+        si_candidates = []
+        other_candidates = []
+
+        for s in streams:
+            s_idx = s.get('index')
+            tags = s.get('tags', {}) or {}
+            lang = tags.get('language', '').lower()
+            name = tags.get('title', f"Track {s_idx}")
+            name_lower = name.lower()
+
+            out_srt = os.path.join(work_dir, f"embedded_sub_{s_idx}_{uuid.uuid4().hex[:4]}.srt")
+            map_arg = f"0:{s_idx}" if str(s_idx).startswith('s:') or ':' in str(s_idx) else f"0:{s_idx}"
+
+            cmd = [
+                'ffmpeg', '-y', '-i', video_path,
+                '-map', map_arg,
+                '-c:s', 'srt',
+                out_srt
+            ]
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
+            except Exception:
+                continue
+
+            if not os.path.exists(out_srt) or os.path.getsize(out_srt) < 300:
+                if os.path.exists(out_srt): os.remove(out_srt)
+                continue
+
+            if not is_valid_sub_file(out_srt):
+                if os.path.exists(out_srt): os.remove(out_srt)
+                continue
+
+            try:
+                enc = detect_encoding(out_srt)
+                try: subs = pysubs2.load(out_srt, encoding=enc)
+                except Exception: subs = pysubs2.load(out_srt, encoding='latin-1')
+
+                lines = len(subs.events)
+
+                # --- 🟢 125-Line Threshold & Subtitle Scoring Logic ---
+                score = lines
+                if lines >= MIN_SUB_LINE_THRESHOLD:
+                    if any(x in name_lower for x in ['si', 'sinhala', 'සිංහල']) or lang == 'si':
+                        score += 200000
+                    elif any(x in name_lower for x in ['en', 'eng', 'english']) or lang == 'en':
+                        score += 100000
+                    elif any(x in name_lower for x in ['ja', 'jap', 'romaji']) or lang == 'ja':
+                        score -= 100000
+                    elif any(x in name_lower for x in ['sign', 'song', 'forced']):
+                        score -= 100000
+                    else:
+                        score += 10000  # Valid other language (French, Spanish, etc.)
+                else:
+                    score -= 50000  # Penalize cracked/incomplete tracks
+
+                log(f"   🎬 Embedded Sub '{name}' | Lang: {lang or 'N/A'} | Lines: {lines} | Score: {score}")
+
+                if score <= 0:
+                    if os.path.exists(out_srt): os.remove(out_srt)
+                    continue
+
+                track_info = {
+                    'path': out_srt,
+                    'lines': lines,
+                    'score': score,
+                    'name': name,
+                    'lang': lang
+                }
+
+                if any(x in name_lower for x in ['si', 'sinhala', 'සිංහල']) or lang == 'si':
+                    si_candidates.append(track_info)
+                else:
+                    other_candidates.append(track_info)
+
+            except Exception:
+                if os.path.exists(out_srt):
+                    try: os.remove(out_srt)
+                    except Exception: pass
+
+        winner_si_path = None
+        if si_candidates:
+            si_candidates.sort(key=lambda x: x['score'], reverse=True)
+            winner_si = si_candidates[0]
+            winner_si_path = winner_si['path']
+            log(f"🏆 WINNER EMBEDDED SINHALA: '{winner_si['name']}' ({winner_si['lines']} lines, Score: {winner_si['score']})")
+            for c in si_candidates[1:]:
+                if os.path.exists(c['path']):
+                    try: os.remove(c['path'])
+                    except Exception: pass
+
+        winner_cand_path = None
+        if other_candidates:
+            other_candidates.sort(key=lambda x: x['score'], reverse=True)
+            winner_cand = other_candidates[0]
+            winner_cand_path = winner_cand['path']
+            log(f"🏆 WINNER EMBEDDED TRANSLATION SOURCE: '{winner_cand['name']}' ({winner_cand['lines']} lines, Score: {winner_cand['score']})")
+            for c in other_candidates[1:]:
+                if os.path.exists(c['path']):
+                    try: os.remove(c['path'])
+                    except Exception: pass
+
+        return winner_si_path, winner_cand_path
     except Exception as e:
-        log(f"⚠️ Local ffmpeg extraction error: {e}")
-    return None
+        log(f"⚠️ Embedded sub extraction error: {e}")
+        return None, None
 
 def download_rpm_sub_api(video_id, work_dir):
-    """Fallback: Downloads subtitle files from RPMShare video files API"""
+    """Fallback: Downloads and scores subtitle tracks from RPMShare video files API,
+    returning (winner_si_path, winner_other_path)."""
     headers = {'api-token': API_TOKEN_2}
     target_host = "https://rpmshare.com"
     try:
@@ -303,64 +416,149 @@ def download_rpm_sub_api(video_id, work_dir):
 
     for attempt in range(4):
         try:
-            time.sleep(5)
+            time.sleep(4)
             f_resp = requests.get(f"https://rpmshare.com/api/v1/video/manage/{video_id}/files", headers=headers, timeout=20)
             if f_resp.status_code == 200:
                 files = f_resp.json()
-                candidates = [f for f in files if f.get('type') == 'Subtitle' and f.get('language') != 'si']
+                candidates = [f for f in files if f.get('type') == 'Subtitle']
                 if candidates:
-                    en_candidates = [c for c in candidates if c.get('language') == 'en' or 'eng' in c.get('name', '').lower()]
-                    sorted_candidates = en_candidates + [c for c in candidates if c not in en_candidates]
-                    for c in sorted_candidates:
-                        dl_resp = requests.get(f"{target_host}{c['url']}", timeout=30)
-                        if dl_resp.status_code == 200:
-                            ext = c.get('extension', 'srt')
-                            temp_path = os.path.join(work_dir, f"rpm_sub_{uuid.uuid4().hex[:4]}.{ext}")
-                            with open(temp_path, "wb") as f:
-                                f.write(dl_resp.content)
-                            if is_valid_sub_file(temp_path):
-                                return temp_path
-                            else:
-                                if os.path.exists(temp_path): os.remove(temp_path)
+                    log(f"🔍 Analyzing {len(candidates)} tracks from RPM (Server 2)...")
+                    si_candidates = []
+                    other_candidates = []
+
+                    for c in candidates:
+                        try:
+                            dl_resp = requests.get(f"{target_host}{c['url']}", timeout=30)
+                            if dl_resp.status_code == 200:
+                                ext = c.get('extension', 'srt')
+                                temp_path = os.path.join(work_dir, f"rpm_sub_{uuid.uuid4().hex[:6]}.{ext}")
+                                with open(temp_path, "wb") as f:
+                                    f.write(dl_resp.content)
+
+                                if not is_valid_sub_file(temp_path):
+                                    if os.path.exists(temp_path): os.remove(temp_path)
+                                    continue
+
+                                enc = detect_encoding(temp_path)
+                                try: subs = pysubs2.load(temp_path, encoding=enc)
+                                except Exception: subs = pysubs2.load(temp_path, encoding='latin-1')
+
+                                lines = len(subs.events)
+                                name = c.get('name', 'Unnamed')
+                                name_lower = name.lower()
+                                lang = c.get('language', '').lower()
+
+                                # --- 🟢 125-Line Threshold & Subtitle Scoring Logic ---
+                                score = lines
+                                if lines >= MIN_SUB_LINE_THRESHOLD:
+                                    if any(x in name_lower for x in ['si', 'sinhala', 'සිංහල']) or lang == 'si':
+                                        score += 200000
+                                    elif any(x in name_lower for x in ['en', 'eng', 'english']) or lang == 'en':
+                                        score += 100000
+                                    elif any(x in name_lower for x in ['ja', 'jap', 'romaji']) or lang == 'ja':
+                                        score -= 100000
+                                    elif any(x in name_lower for x in ['sign', 'song', 'forced']):
+                                        score -= 100000
+                                    else:
+                                        score += 10000
+                                else:
+                                    score -= 50000
+
+                                log(f"   📄 RPM Track '{name}' | Lang: {lang or 'N/A'} | Lines: {lines} | Score: {score}")
+
+                                if score <= 0:
+                                    if os.path.exists(temp_path): os.remove(temp_path)
+                                    continue
+
+                                track_info = {
+                                    'path': temp_path,
+                                    'lines': lines,
+                                    'score': score,
+                                    'name': name,
+                                    'lang': lang
+                                }
+
+                                if any(x in name_lower for x in ['si', 'sinhala', 'සිංහල']) or lang == 'si':
+                                    si_candidates.append(track_info)
+                                else:
+                                    other_candidates.append(track_info)
+                        except Exception:
+                            pass
+
+                    winner_si_path = None
+                    if si_candidates:
+                        si_candidates.sort(key=lambda x: x['score'], reverse=True)
+                        winner_si_path = si_candidates[0]['path']
+                        log(f"🏆 WINNER RPM SINHALA: '{si_candidates[0]['name']}' ({si_candidates[0]['lines']} lines, Score: {si_candidates[0]['score']})")
+                        for loser in si_candidates[1:]:
+                            if os.path.exists(loser['path']):
+                                try: os.remove(loser['path'])
+                                except Exception: pass
+
+                    winner_other_path = None
+                    if other_candidates:
+                        other_candidates.sort(key=lambda x: x['score'], reverse=True)
+                        winner_other_path = other_candidates[0]['path']
+                        log(f"🏆 WINNER RPM TRANSLATION SOURCE: '{other_candidates[0]['name']}' ({other_candidates[0]['lines']} lines, Score: {other_candidates[0]['score']})")
+                        for loser in other_candidates[1:]:
+                            if os.path.exists(loser['path']):
+                                try: os.remove(loser['path'])
+                                except Exception: pass
+
+                    return winner_si_path, winner_other_path
         except Exception:
             pass
-    return None
+    return None, None
 
 def process_episode_subtitles(ep_num, video_path, video_id, anime_id, title, work_dir):
     """Extracts, cleans, translates to Sinhala, and uploads both subs to GitHub Releases & RPM"""
-    log(f"💬 Ep {ep_num} Extracting Subtitles...")
-    sub_src = extract_sub_from_local_video(video_path, work_dir)
-    if not sub_src:
-        sub_src = download_rpm_sub_api(video_id, work_dir)
+    log(f"💬 Ep {ep_num} Extracting Subtitles with 125-Line Scoring System...")
+    si_src = None
+    other_src = None
+
+    if video_path and os.path.exists(video_path):
+        si_src, other_src = extract_sub_from_local_video(video_path, work_dir)
+
+    if not si_src and not other_src and video_id:
+        si_src, other_src = download_rpm_sub_api(video_id, work_dir)
 
     si_url = None
     en_url = None
     rel_ctx = {}
 
-    if sub_src:
+    # If an existing valid Sinhala sub was discovered
+    if si_src:
+        log(f"🎉 Ep {ep_num} Existing Sinhala Sub Found ({si_src})! Uploading directly...")
+        si_url = upload_to_github_release(si_src, asset_name="Sinhala.srt", release_context=rel_ctx)
+        delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
+        upload_sub_to_rpm(video_id, si_src, api_token=API_TOKEN_2, remote_url=si_url)
+        clear_missing_sub_alert(rtdb, anime_id, ep_num)
+        log(f"🎉 Ep {ep_num} Sinhala Sub Attached to RPM & GitHub: {si_url}")
+
+    # Process English or other source track for Sinhala translation
+    if other_src:
         try:
-            # 1. English Subtitle
-            en_processed = process_english_sub(sub_src, log_prefix=f"[{WORKER_ID} Ep {ep_num}]")
-            target_en = en_processed if en_processed else sub_src
+            en_processed = process_english_sub(other_src, log_prefix=f"[{WORKER_ID} Ep {ep_num}]")
+            target_en = en_processed if en_processed else other_src
             en_url = upload_to_github_release(target_en, asset_name="English.srt", release_context=rel_ctx)
             if en_url:
                 log(f"✅ Ep {ep_num} English Sub Online: {en_url}")
 
-            # 2. Sinhala Subtitle
-            log(f"🔄 Ep {ep_num} Translating Subtitle to Sinhala...")
-            out_si_name = os.path.join(work_dir, f"sinhala_{uuid.uuid4().hex[:4]}.srt")
-            si_processed = process_sinhala_sub(
-                target_en,
-                out_name=out_si_name,
-                max_workers=5,
-                log_prefix=f"[{WORKER_ID} Ep {ep_num}]"
-            )
-            if si_processed:
-                si_url = upload_to_github_release(si_processed, asset_name="Sinhala.srt", release_context=rel_ctx)
-                delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
-                upload_sub_to_rpm(video_id, si_processed, api_token=API_TOKEN_2, remote_url=si_url)
-                clear_missing_sub_alert(rtdb, anime_id, ep_num)
-                log(f"🎉 Ep {ep_num} Sinhala Sub Attached to RPM & GitHub: {si_url}")
+            if not si_url:
+                log(f"🔄 Ep {ep_num} Translating Subtitle to Sinhala (Auto Source Detection)...")
+                out_si_name = os.path.join(work_dir, f"sinhala_{uuid.uuid4().hex[:4]}.srt")
+                si_processed = process_sinhala_sub(
+                    target_en,
+                    out_name=out_si_name,
+                    max_workers=5,
+                    log_prefix=f"[{WORKER_ID} Ep {ep_num}]"
+                )
+                if si_processed:
+                    si_url = upload_to_github_release(si_processed, asset_name="Sinhala.srt", release_context=rel_ctx)
+                    delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
+                    upload_sub_to_rpm(video_id, si_processed, api_token=API_TOKEN_2, remote_url=si_url)
+                    clear_missing_sub_alert(rtdb, anime_id, ep_num)
+                    log(f"🎉 Ep {ep_num} Sinhala Sub Attached to RPM & GitHub: {si_url}")
         except Exception as e:
             log(f"⚠️ Subtitle translation/upload error on Ep {ep_num}: {e}")
 
@@ -633,6 +831,85 @@ def execute_cloud_mega_batch(db, anime_id, collection_name="anime_series"):
     log(f"🏁 Cloud Mega Batch Finished for {title}! (Uploaded: {batch_uploaded_count}, Failed: {failed_count})")
     return True
 
+# ==========================================
+# ⚡ 7. SINGLE EPISODE ORCHESTRATOR
+# ==========================================
+def execute_cloud_single_episode(db, payload):
+    anime_id = payload.get("anime_id")
+    ep_num = int(payload.get("ep_num", 1))
+    collection_name = payload.get("collection_name", "anime_series")
+
+    series_ref = db.collection(collection_name).document(str(anime_id))
+    snap = series_ref.get()
+    if not snap.exists:
+        log(f"❌ Series document {anime_id} not found!")
+        return False
+
+    series_data = snap.to_dict() or {}
+    title = series_data.get('title', {}).get('english') or series_data.get('title', {}).get('romaji') or f"Anime {anime_id}"
+    folder_id = series_data.get('rpm_folder_id')
+    magnet_link = series_data.get('custom_batch_url')
+    backup_magnets = [m for m in series_data.get('backup_magnets', []) if m]
+
+    log("==================================================")
+    log(f"⚡ Cloud Single Episode Worker: {title} | EPISODE {ep_num}")
+    log(f"💬 125-Line Subtitle Scoring & Auto-Translation Pipeline")
+    log("==================================================")
+
+    meta_dir = "meta_cache"
+    os.makedirs(meta_dir, exist_ok=True)
+    main_torrent_file = download_torrent_metadata(magnet_link, work_dir=meta_dir)
+    main_file_map = scan_torrent_files(main_torrent_file) if main_torrent_file else {}
+
+    backup_maps = []
+    for b_idx, b_mag in enumerate(backup_magnets):
+        b_file = download_torrent_metadata(b_mag, work_dir=meta_dir)
+        if b_file:
+            b_map = scan_torrent_files(b_file)
+            if b_map:
+                backup_maps.append({'torrent_file': b_file, 'file_map': b_map})
+
+    res = process_single_episode(
+        ep_num,
+        main_torrent_file,
+        main_file_map,
+        backup_maps,
+        folder_id,
+        anime_id,
+        title,
+        collection_name,
+        db
+    )
+
+    if res and res.get('status') == 'success':
+        log(f"🎉 Episode {ep_num} 100% COMPLETE and uploaded!")
+        try:
+            total_eps = int(series_data.get('episodes_total', 0))
+            eps_snap = series_ref.collection('episodes').where('status', '==', 'uploaded').get()
+            uploaded_count = len(eps_snap)
+            series_ref.update({
+                'last_uploaded_ep': max(ep_num, int(series_data.get('last_uploaded_ep', 0))),
+                'uploaded_episodes_count': uploaded_count
+            })
+            if total_eps > 0 and uploaded_count >= total_eps:
+                series_ref.update({'status': 'completed'})
+                log(f"🏁 All {total_eps} episodes completed for {title}!")
+        except Exception as e:
+            log(f"⚠️ Notice on progress update: {e}")
+        return True
+    else:
+        log(f"❌ Episode {ep_num} failed.")
+        try:
+            ep_doc_id = f"episode_{ep_num:04d}"
+            series_ref.collection('episodes').document(ep_doc_id).update({
+                'status': 'failed_upload',
+                'last_error': 'Failed across available magnets',
+                'last_updated': firestore.SERVER_TIMESTAMP
+            })
+        except Exception:
+            pass
+        return False
+
 def main():
     log("🤖 Long Anime Cloud Worker Starting...")
     payload_str = os.getenv("JOB_PAYLOAD", "")
@@ -657,8 +934,16 @@ def main():
         sys.exit(1)
 
     db = init_firebase()
-    success = execute_cloud_mega_batch(db, anime_id, collection_name=collection_name)
-    sys.exit(0 if success else 2)
+
+    ep_num = payload.get("ep_num")
+    job_type = payload.get("job_type")
+
+    if ep_num is not None or job_type == "single_episode":
+        success = execute_cloud_single_episode(db, payload)
+    else:
+        success = execute_cloud_mega_batch(db, anime_id, collection_name=collection_name)
+
+    sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
     main()

@@ -438,6 +438,15 @@ def get_github_credentials(caller_env=None):
             load_dotenv(env_f, override=False)
             token = token or os.getenv("GITHUB_TOKEN")
             repo = repo or os.getenv("GITHUB_REPO")
+    # Check Firebase RTDB for auto-rotated active repository
+    try:
+        from firebase_admin import db as rtdb
+        active_vault = rtdb.reference("config/active_sub_vault").get()
+        if active_vault and isinstance(active_vault, str) and "/" in active_vault:
+            repo = active_vault.strip('"\'').strip()
+    except Exception:
+        pass
+
     token = token or os.getenv("GITHUB_TOKEN", "")
     repo = repo or os.getenv("GITHUB_REPO", "Anishift-svr/sub-vault-160633")
     if token: token = token.strip('"\'').strip()
@@ -469,6 +478,12 @@ def create_new_github_repo(token, caller_env=None):
             new_full_repo = f"{username}/{new_repo_name}"
             env_file = get_env_file_for_caller(caller_env)
             update_env_repo(new_full_repo, env_file)
+            try:
+                from firebase_admin import db as rtdb
+                rtdb.reference("config/active_sub_vault").set(new_full_repo)
+                print(f"[SUB-ENGINE] 🌐 Synced new repo '{new_full_repo}' to Firebase RTDB config/active_sub_vault", flush=True)
+            except Exception:
+                pass
             time.sleep(2)
             return new_full_repo
         else:
