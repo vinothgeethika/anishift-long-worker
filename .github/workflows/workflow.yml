@@ -1,12 +1,12 @@
-name: Long Anime Mega Batch Processing Workflow
+name: Long Anime Cloud Worker Workflow
 
 on:
   repository_dispatch:
-    types: [process_long_batch_job]
+    types: [process_long_episode_job, process_long_batch_job]
 
 concurrency:
-  group: long-worker-${{ github.event.client_payload.anime_id }}
-  cancel-in-progress: true
+  group: long-worker-${{ github.event.client_payload.anime_id }}-${{ github.event.client_payload.ep_num || 'batch' }}
+  cancel-in-progress: false
 
 jobs:
   process_long_batch:
@@ -37,7 +37,7 @@ jobs:
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          pip install tuspy requests-toolbelt torrentool firebase-admin requests python-dotenv pysubs2 deep-translator beautifulsoup4 chardet
+          pip install google-api-core==2.34.0 tuspy requests-toolbelt torrentool firebase-admin requests python-dotenv pysubs2 deep-translator beautifulsoup4 chardet
 
       - name: Setup Firebase Credentials
         env:
