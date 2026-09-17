@@ -218,7 +218,7 @@ def scan_torrent_files(torrent_file):
 # ==========================================
 # 🚀 3. TUS UPLOADER (RPMShare Server 2)
 # ==========================================
-def upload_via_tus(file_path, folder_id):
+def upload_via_tus(file_path, folder_id, ep_num=None):
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         try:
@@ -241,24 +241,45 @@ def upload_via_tus(file_path, folder_id):
             while uploader.offset < file_size:
                 uploader.upload_chunk()
 
-            time.sleep(6)
-            search_resp = requests.get(
-                f"https://rpmshare.com/api/v1/video/manage?search={urllib.parse.quote(file_name)}",
-                headers=headers, timeout=25
-            ).json()
-            video_id = search_resp['data'][0]['id'] if 'data' in search_resp and search_resp['data'] else None
-            if video_id:
-                return video_id
+            log(f"📤 Uploaded file chunks for '{file_name}'. Resolving Video ID from RPMShare...")
 
-            log(f"⚠️ Video ID not immediately indexed (attempt {attempt}/{max_retries}). Retrying in 5s...")
-            time.sleep(5)
-            search_resp2 = requests.get(
-                f"https://rpmshare.com/api/v1/video/manage?search={urllib.parse.quote(file_name)}",
-                headers=headers, timeout=25
-            ).json()
-            video_id2 = search_resp2['data'][0]['id'] if 'data' in search_resp2 and search_resp2['data'] else None
-            if video_id2:
-                return video_id2
+            # Poll for Video ID using 3 reliable strategies (avoids Cloudflare drops on complex names)
+            for poll in range(1, 8):
+                time.sleep(4)
+
+                # Strategy 1: Check recent uploads list (fastest & most accurate)
+                try:
+                    recent = requests.get("https://rpmshare.com/api/v1/video/manage?per_page=15", headers=headers, timeout=15).json()
+                    for v in recent.get('data', []):
+                        if v.get('name') == file_name:
+                            log(f"🎯 Resolved Video ID via recent uploads: {v.get('id')}")
+                            return v.get('id')
+                except Exception:
+                    pass
+
+                # Strategy 2: Search by 4-digit episode number (e.g. 0488)
+                if ep_num is not None:
+                    try:
+                        search_ep = requests.get(f"https://rpmshare.com/api/v1/video/manage?search={ep_num:04d}", headers=headers, timeout=15).json()
+                        for v in search_ep.get('data', []):
+                            if v.get('name') == file_name or f"{ep_num:04d}" in (v.get('name') or ''):
+                                log(f"🎯 Resolved Video ID via episode search: {v.get('id')}")
+                                return v.get('id')
+                    except Exception:
+                        pass
+
+                # Strategy 3: Clean search by name without brackets/special characters
+                try:
+                    clean_name = re.sub(r'[\[\]\(\)!?]', ' ', file_name).strip()[:35]
+                    search_clean = requests.get(f"https://rpmshare.com/api/v1/video/manage?search={urllib.parse.quote(clean_name)}", headers=headers, timeout=15).json()
+                    for v in search_clean.get('data', []):
+                        if v.get('name') == file_name:
+                            log(f"🎯 Resolved Video ID via clean search: {v.get('id')}")
+                            return v.get('id')
+                except Exception:
+                    pass
+
+            log(f"⚠️ Video ID not found on attempt {attempt}/{max_retries}.")
 
         except Exception as e:
             log(f"❌ Upload Attempt {attempt}/{max_retries} Error: {e}")
@@ -531,9 +552,15 @@ def process_episode_subtitles(ep_num, video_path, video_id, anime_id, title, wor
         log(f"🎉 Ep {ep_num} Existing Sinhala Sub Found ({si_src})! Uploading directly...")
         si_url = upload_to_github_release(si_src, asset_name="Sinhala.srt", release_context=rel_ctx)
         delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
-        upload_sub_to_rpm(video_id, si_src, api_token=API_TOKEN_2, remote_url=si_url)
-        clear_missing_sub_alert(rtdb, anime_id, ep_num)
-        log(f"🎉 Ep {ep_num} Sinhala Sub Attached to RPM & GitHub: {si_url}")
+        attached = upload_sub_to_rpm(
+            video_id, si_src, api_token=API_TOKEN_2, remote_url=si_url,
+            background_if_pending=False, log_prefix=f"[{WORKER_ID} Ep {ep_num}]"
+        )
+        if attached:
+            clear_missing_sub_alert(rtdb, anime_id, ep_num)
+            log(f"🎉 Ep {ep_num} Sinhala Sub Attached to RPM & GitHub: {si_url}")
+        else:
+            log(f"⚠️ Ep {ep_num} Sinhala Sub uploaded to GitHub ({si_url}) but failed to attach to RPM player!")
 
     # Process English or other source track for Sinhala translation
     if other_src:
@@ -556,9 +583,15 @@ def process_episode_subtitles(ep_num, video_path, video_id, anime_id, title, wor
                 if si_processed:
                     si_url = upload_to_github_release(si_processed, asset_name="Sinhala.srt", release_context=rel_ctx)
                     delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
-                    upload_sub_to_rpm(video_id, si_processed, api_token=API_TOKEN_2, remote_url=si_url)
-                    clear_missing_sub_alert(rtdb, anime_id, ep_num)
-                    log(f"🎉 Ep {ep_num} Sinhala Sub Attached to RPM & GitHub: {si_url}")
+                    attached = upload_sub_to_rpm(
+                        video_id, si_processed, api_token=API_TOKEN_2, remote_url=si_url,
+                        background_if_pending=False, log_prefix=f"[{WORKER_ID} Ep {ep_num}]"
+                    )
+                    if attached:
+                        clear_missing_sub_alert(rtdb, anime_id, ep_num)
+                        log(f"🎉 Ep {ep_num} Sinhala Sub Attached to RPM & GitHub: {si_url}")
+                    else:
+                        log(f"⚠️ Ep {ep_num} Sinhala Sub uploaded to GitHub ({si_url}) but failed to attach to RPM player!")
         except Exception as e:
             log(f"⚠️ Subtitle translation/upload error on Ep {ep_num}: {e}")
 
@@ -598,7 +631,7 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
 
             if found_video_path and os.path.exists(found_video_path) and os.path.getsize(found_video_path) > 1024 * 1024:
                 log(f"🚀 Ep {ep_num} Uploading video to RPMShare (Server 2)...")
-                video_id = upload_via_tus(found_video_path, folder_id)
+                video_id = upload_via_tus(found_video_path, folder_id, ep_num=ep_num)
                 if video_id:
                     uploaded_successfully = True
                     source_used = "main"
@@ -627,7 +660,7 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
 
                     if found_video_path and os.path.exists(found_video_path) and os.path.getsize(found_video_path) > 1024 * 1024:
                         log(f"🚀 Ep {ep_num} (Backup #{b_idx+1}) Uploading video to RPMShare...")
-                        video_id = upload_via_tus(found_video_path, folder_id)
+                        video_id = upload_via_tus(found_video_path, folder_id, ep_num=ep_num)
                         if video_id:
                             uploaded_successfully = True
                             source_used = f"backup_{b_idx+1}"
@@ -657,6 +690,32 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
         # Guarantee immediate disk space cleanup after each episode completes
         shutil.rmtree(ep_dir, ignore_errors=True)
 
+def resolve_total_episodes(s_data, s_ref=None):
+    """Accurately calculates total episodes for regular or ongoing long anime, preventing corrupt 1-episode counts."""
+    next_airing = s_data.get('next_airing') or {}
+    if isinstance(next_airing, dict) and next_airing.get('next_episode'):
+        airing_ep = int(next_airing['next_episode']) - 1
+        if airing_ep > 1:
+            return airing_ep
+
+    ep_total = int(s_data.get('episodes_total', 0) or 0)
+    if ep_total > 1:
+        return ep_total
+
+    if s_ref:
+        try:
+            eps = list(s_ref.collection('episodes').select(['episodeNumber']).stream())
+            if eps:
+                nums = [int(e.to_dict().get('episodeNumber', 0)) for e in eps if e.to_dict().get('episodeNumber')]
+                if nums:
+                    return max(max(nums), len(eps))
+        except Exception:
+            pass
+
+    next_ep = int(s_data.get('next_episode', 0) or 0)
+    last_up = int(s_data.get('last_uploaded_ep', 0) or 0)
+    return max(next_ep - 1, last_up, 1)
+
 # ==========================================
 # 🎯 6. MEGA BATCH ORCHESTRATOR
 # ==========================================
@@ -673,8 +732,8 @@ def execute_cloud_mega_batch(db, anime_id, collection_name="anime_series"):
     magnet_link = series_data.get('custom_batch_url')
     backup_magnets = [m for m in series_data.get('backup_magnets', []) if m]
 
-    total_eps = int(series_data.get('episodes_total', 0))
-    last_uploaded_ep = int(series_data.get('last_uploaded_ep', 0))
+    total_eps = resolve_total_episodes(series_data, series_ref)
+    last_uploaded_ep = int(series_data.get('last_uploaded_ep', 0) or 0)
     ram_tracker = last_uploaded_ep
 
     log("==================================================")
@@ -884,21 +943,52 @@ def execute_cloud_single_episode(db, payload):
     if res and res.get('status') == 'success':
         log(f"🎉 Episode {ep_num} 100% COMPLETE and uploaded!")
         try:
-            total_eps = int(series_data.get('episodes_total', 0))
-            eps_snap = series_ref.collection('episodes').where('status', '==', 'uploaded').get()
-            uploaded_count = len(eps_snap)
+            curr_last = int(series_data.get('last_uploaded_ep', 0) or 0)
+            new_last = max(ep_num, curr_last)
+
+            next_airing = series_data.get('next_airing') or {}
+            airing_ep = (int(next_airing['next_episode']) - 1) if (isinstance(next_airing, dict) and next_airing.get('next_episode')) else 0
+            ep_total = int(series_data.get('episodes_total', 0) or 0)
+            total_eps = max(ep_total, airing_ep, 1)
+
+            uploaded_count = max(new_last, int(series_data.get('uploaded_episodes_count', 0) or 0) + 1)
             series_ref.update({
-                'last_uploaded_ep': max(ep_num, int(series_data.get('last_uploaded_ep', 0))),
-                'uploaded_episodes_count': uploaded_count
+                'last_uploaded_ep': new_last,
+                'next_episode': new_last + 1,
+                'uploaded_episodes_count': uploaded_count,
+                'episodes_total': total_eps
             })
-            if total_eps > 0 and uploaded_count >= total_eps:
-                series_ref.update({'status': 'completed'})
+
+            # Send RTDB completion signal (unlimited quota-free reads/writes)
+            try:
+                get_rtdb_ref(f"{RTDB_LONG_NODE}/{anime_id}/completed_episodes/{ep_num}").set({
+                    "status": "uploaded",
+                    "timestamp": int(time.time() * 1000)
+                })
+                get_rtdb_ref(f"{RTDB_LONG_NODE}/{anime_id}").update({
+                    "total_uploaded": new_last,
+                    "current_ep": new_last + 1,
+                    "updated_at": int(time.time() * 1000)
+                })
+            except Exception as e:
+                log(f"⚠️ RTDB completion notification notice: {e}")
+
+            if total_eps > 1 and new_last >= total_eps:
+                if not series_data.get('is_ongoing'):
+                    series_ref.update({'status': 'completed'})
                 log(f"🏁 All {total_eps} episodes completed for {title}!")
         except Exception as e:
             log(f"⚠️ Notice on progress update: {e}")
         return True
     else:
         log(f"❌ Episode {ep_num} failed.")
+        try:
+            get_rtdb_ref(f"{RTDB_LONG_NODE}/{anime_id}/completed_episodes/{ep_num}").set({
+                "status": "failed_upload",
+                "timestamp": int(time.time() * 1000)
+            })
+        except Exception:
+            pass
         try:
             ep_doc_id = f"episode_{ep_num:04d}"
             series_ref.collection('episodes').document(ep_doc_id).update({

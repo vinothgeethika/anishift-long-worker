@@ -760,13 +760,22 @@ def upload_sub_to_rpm(video_id, sub_file=None, api_token=None, remote_url=None, 
         print(f"[{log_prefix}] 🚀 Queued background subtitle attacher for RPM Video {video_id} (will attach as soon as Active)", flush=True)
         return True
     else:
-        for attempt in range(1, 61):
-            time.sleep(15)
+        print(f"[{log_prefix}] ⏳ Video {video_id} is '{status or 'Pending'}' (Transcoding). Waiting for 'Active' before attaching subtitle...", flush=True)
+        for attempt in range(1, 61):  # Poll every 10s up to 10 minutes
+            time.sleep(10)
             st = check_rpm_video_status(video_id, api_token=api_token, base_url=base_url)
             if st == 'Active':
-                ok, _ = _perform_rpm_sub_attach(video_id, sub_bytes, sub_filename, api_token, remote_url=remote_url, base_url=base_url, log_prefix=log_prefix)
+                print(f"[{log_prefix}] ⚡ Video {video_id} is now 'Active'! Attaching Sinhala subtitle...", flush=True)
+                ok, res_text = _perform_rpm_sub_attach(video_id, sub_bytes, sub_filename, api_token, remote_url=remote_url, base_url=base_url, log_prefix=log_prefix)
                 if ok:
                     print(f"[{log_prefix}] 🎬 ✅ Attached Sinhala Subtitle to RPM Player: Video {video_id}", flush=True)
                     return True
+                else:
+                    print(f"[{log_prefix}] ⚠️ Failed to attach subtitle to Active Video {video_id}: {res_text}", flush=True)
+                    return False
+            elif st in ['Error', 'Failed', 'Cancelled']:
+                print(f"[{log_prefix}] ❌ Video {video_id} entered state '{st}'. Aborting subtitle attachment.", flush=True)
+                return False
+        print(f"[{log_prefix}] ⏱️ Timeout waiting for Video {video_id} to become Active on RPM.", flush=True)
         return False
 
