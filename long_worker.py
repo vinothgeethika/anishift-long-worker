@@ -699,43 +699,79 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
                         source_used = f"backup_{b_idx+1}"
                         break
 
-        # C. Process Subtitles & Soft-Mux BEFORE Uploading to RPMShare
+        # C. Process Subtitles BEFORE Uploading (Clean, extract, translate to Sinhala)
         if found_video_path and os.path.exists(found_video_path) and os.path.getsize(found_video_path) > 1024 * 1024:
             si_url, en_url, local_si = process_episode_subtitles(ep_num, found_video_path, None, anime_id, title, ep_dir)
 
-            upload_video_path = found_video_path
-            # Soft-Mux Sinhala Subtitle into MKV container
-            if local_si and os.path.exists(local_si) and os.path.getsize(local_si) > 50:
-                muxed_path = os.path.join(ep_dir, f"muxed_{os.path.basename(found_video_path)}")
-                log(f"🎬 Ep {ep_num} Soft-muxing Sinhala subtitle into MKV container (Method 1)...")
-                ok_mux = soft_mux_sinhala_sub(found_video_path, local_si, muxed_path)
-                if ok_mux and os.path.exists(muxed_path) and os.path.getsize(muxed_path) > 1024 * 1024:
-                    log(f"✨ Ep {ep_num} Soft-mux complete! Video now contains embedded Sinhala subtitle stream.")
-                    upload_video_path = muxed_path
-                else:
-                    log(f"⚠️ Ep {ep_num} Soft-mux fallback to original file.")
-
-            log(f"🚀 Ep {ep_num} Uploading video to RPMShare (Server 2)...")
-            video_id = upload_via_tus(upload_video_path, folder_id, ep_num=ep_num)
+            # Upload UNTOUCHED original video directly to RPMShare (Maximum hardware-accelerated transcoding speed!)
+            log(f"🚀 Ep {ep_num} Uploading UNTOUCHED original video to RPMShare (Server 2)...")
+            video_id = upload_via_tus(found_video_path, folder_id, ep_num=ep_num)
             if video_id:
                 uploaded_successfully = True
 
         if uploaded_successfully and video_id:
             ep_doc_id = f"episode_{ep_num:04d}"
             try:
-                db.collection(collection_name).document(str(anime_id)).collection('episodes').document(ep_doc_id).update({
-                    'status': 'uploaded',
-                    'links.rpm_video_id': video_id,
-                    'links.rpm_stream': f"https://rpmshare.com/v/{video_id}",
-                    'server': 2,
-                    'subtitles.sinhala': si_url if si_url else 'embedded',
-                    'subtitles.english': en_url if en_url else 'not_found',
-                    'last_updated': firestore.SERVER_TIMESTAMP
-                })
+                if db:
+                    db.collection(collection_name).document(str(anime_id)).collection('episodes').document(ep_doc_id).update({
+                        'status': 'uploaded',
+                        'links.rpm_video_id': video_id,
+                        'links.rpm_stream': f"https://rpmshare.com/v/{video_id}",
+                        'server': 2,
+                        'subtitles.sinhala': si_url if si_url else 'pending',
+                        'subtitles.english': en_url if en_url else 'not_found',
+                        'last_updated': firestore.SERVER_TIMESTAMP
+                    })
             except Exception:
                 pass
 
-            log(f"✨ Ep {ep_num} 100% COMPLETE! Video ID: {video_id} | Sinhala Sub: {si_url or 'Embedded in MKV'}")
+            # Send immediate RTDB completion signal so VPS Manager instantly starts next episode without waiting!
+            try:
+                get_rtdb_ref(f"{RTDB_LONG_NODE}/{anime_id}/completed_episodes/{ep_num}").set({
+                    "status": "uploaded",
+                    "timestamp": int(time.time() * 1000)
+                })
+                get_rtdb_ref(f"{RTDB_LONG_NODE}/{anime_id}").update({
+                    "total_uploaded": ep_num,
+                    "current_ep": ep_num + 1,
+                    "updated_at": int(time.time() * 1000)
+                })
+                log(f"📡 Ep {ep_num} RTDB upload signal dispatched! VPS Manager can now dispatch next episode immediately.")
+            except Exception as e:
+                log(f"⚠️ RTDB signal notice: {e}")
+
+            # Delete bulky video file from disk now that it's safely on RPMShare
+            try:
+                if found_video_path and os.path.exists(found_video_path):
+                    os.remove(found_video_path)
+            except Exception:
+                pass
+
+            # Wait for RPMShare Active status and attach Sinhala subtitle via official API ('සිංහල')
+            if si_url or (local_si and os.path.exists(local_si)):
+                log(f"⏳ Ep {ep_num} Waiting for RPMShare video {video_id} to become 'Active' to attach 'සිංහල' subtitle...")
+                for attempt in range(1, 121):  # Poll every 20s up to 40 minutes
+                    time.sleep(20)
+                    st = check_rpm_video_status(video_id, api_token=API_TOKEN_2)
+                    if st == 'Active':
+                        log(f"🎬 Ep {ep_num} Video {video_id} is now Active! Attaching 'සිංහල' subtitle via API...")
+                        delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
+                        attached = upload_sub_to_rpm(
+                            video_id,
+                            sub_file=local_si if (local_si and os.path.exists(local_si)) else None,
+                            api_token=API_TOKEN_2,
+                            remote_url=si_url,
+                            background_if_pending=False,
+                            log_prefix=f"[{WORKER_ID} Ep {ep_num}]"
+                        )
+                        if attached:
+                            clear_missing_sub_alert(rtdb, anime_id, ep_num)
+                            log(f"🎉 Ep {ep_num} Sinhala Subtitle 100% attached to RPM Player as 'සිංහල'!")
+                        break
+                    elif attempt % 6 == 0:
+                        log(f"   ⏳ Ep {ep_num} RPM Transcoding in progress... ({attempt * 20}s elapsed, status: {st})")
+
+            log(f"✨ Ep {ep_num} 100% COMPLETE! Video ID: {video_id} | Sinhala Sub: {si_url}")
             return {'ep_num': ep_num, 'status': 'success', 'video_id': video_id, 'source': source_used}
         else:
             log(f"❌ Ep {ep_num} FAILED across all available magnets.")
