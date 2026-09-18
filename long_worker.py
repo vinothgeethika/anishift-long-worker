@@ -557,7 +557,7 @@ def soft_mux_sinhala_sub(video_path, srt_path, output_path):
             '-map', '0',
             '-map', '1:0',
             '-c', 'copy',
-            f'-metadata:s:s:{sub_count}', 'language=sin',
+            f'-metadata:s:s:{sub_count}', 'language=si',
             f'-metadata:s:s:{sub_count}', 'title=Sinhala',
             output_path
         ]
