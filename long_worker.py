@@ -70,6 +70,44 @@ except ImportError:
     except ImportError:
         MIN_SUB_LINE_THRESHOLD = 125
 
+if 'check_rpm_video_status' not in globals():
+    def check_rpm_video_status(video_id, api_token=None, base_url="https://rpmshare.com/api/v1"):
+        if not video_id:
+            return None
+        if not api_token:
+            api_token = os.getenv("RPMSHARE_API_TOKEN_2") or os.getenv("RPMSHARE_API_TOKEN")
+        headers = {'api-token': api_token}
+        try:
+            r = requests.get(f"{base_url}/video/manage/{video_id}", headers=headers, timeout=15)
+            if r.status_code == 200:
+                return r.json().get('status')
+        except Exception:
+            pass
+        return None
+
+if 'delete_existing_sinhala_subs' not in globals():
+    def delete_existing_sinhala_subs(video_id, api_token=None, base_url="https://rpmshare.com/api/v1", log_prefix="SUB-ENGINE"):
+        if not video_id: return
+        if not api_token: api_token = os.getenv("RPMSHARE_API_TOKEN_2") or os.getenv("RPMSHARE_API_TOKEN")
+        headers = {'api-token': api_token}
+        try:
+            resp = requests.get(f"{base_url}/video/manage/{video_id}/files", headers=headers, timeout=15)
+            if resp.status_code == 200:
+                for f in resp.json():
+                    if f.get('type') == 'Subtitle':
+                        lang = (f.get('language') or '').lower()
+                        name = (f.get('name') or '').lower()
+                        if lang == 'si' or 'si' in name or 'sinhala' in name or 'සිංහල' in name:
+                            sub_id = f.get('id')
+                            if sub_id:
+                                requests.delete(f"{base_url}/video/manage/{video_id}/subtitle/{sub_id}", headers=headers, timeout=10)
+        except Exception:
+            pass
+
+if 'clear_missing_sub_alert' not in globals():
+    def clear_missing_sub_alert(*args, **kwargs): pass
+
+
 load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -750,7 +788,7 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
                 pass
 
             # Wait for RPMShare Active status and attach Sinhala subtitle via official API ('සිංහල')
-            if si_url or (local_si and os.path.exists(local_si)):
+            if si_url or (local_si_path and os.path.exists(local_si_path)):
                 log(f"⏳ Ep {ep_num} Waiting for RPMShare video {video_id} to become 'Active' to attach 'සිංහල' subtitle...")
                 for attempt in range(1, 121):  # Poll every 20s up to 40 minutes
                     time.sleep(20)
@@ -760,7 +798,7 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
                         delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
                         attached = upload_sub_to_rpm(
                             video_id,
-                            sub_file=local_si if (local_si and os.path.exists(local_si)) else None,
+                            sub_file=local_si_path if (local_si_path and os.path.exists(local_si_path)) else None,
                             api_token=API_TOKEN_2,
                             remote_url=si_url,
                             background_if_pending=False,
