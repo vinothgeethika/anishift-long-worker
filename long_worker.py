@@ -753,17 +753,24 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
             ep_doc_id = f"episode_{ep_num:04d}"
             try:
                 if db:
-                    db.collection(collection_name).document(str(anime_id)).collection('episodes').document(ep_doc_id).update({
+                    ep_ref = db.collection(collection_name).document(str(anime_id)).collection('episodes').document(ep_doc_id)
+                    ep_ref.set({
                         'status': 'uploaded',
-                        'links.rpm_video_id': video_id,
-                        'links.rpm_stream': f"https://rpmshare.com/v/{video_id}",
+                        'links': {
+                            'rpm_video_id': video_id,
+                            'rpm_stream': f"https://rpmshare.com/v/{video_id}",
+                            'rpm_download': f"https://rpmshare.com/d/{video_id}"
+                        },
                         'server': 2,
-                        'subtitles.sinhala': si_url if si_url else 'pending',
-                        'subtitles.english': en_url if en_url else 'not_found',
+                        'subtitles': {
+                            'sinhala': si_url if si_url else 'pending',
+                            'english': en_url if en_url else 'not_found'
+                        },
                         'last_updated': firestore.SERVER_TIMESTAMP
-                    })
-            except Exception:
-                pass
+                    }, merge=True)
+                    log(f"💾 Ep {ep_num} Firestore successfully updated: Video ID ({video_id}) | Sinhala Sub DDL ({si_url})")
+            except Exception as e:
+                log(f"⚠️ Firestore update notice on Ep {ep_num}: {e}")
 
             # Send immediate RTDB completion signal so VPS Manager instantly starts next episode without waiting!
             try:
