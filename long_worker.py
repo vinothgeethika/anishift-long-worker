@@ -953,17 +953,27 @@ def execute_cloud_single_episode(db, payload):
     ep_num = int(payload.get("ep_num", 1))
     collection_name = payload.get("collection_name", "anime_series")
 
-    series_ref = db.collection(collection_name).document(str(anime_id))
-    snap = series_ref.get()
-    if not snap.exists:
-        log(f"❌ Series document {anime_id} not found!")
-        return False
+    series_data = {}
+    series_ref = None
+    if db:
+        try:
+            series_ref = db.collection(collection_name).document(str(anime_id))
+            snap = series_ref.get()
+            if snap.exists:
+                series_data = snap.to_dict() or {}
+            else:
+                log(f"⚠️ Series document {anime_id} not found in Firestore. Using payload data.")
+        except Exception as e:
+            log(f"⚠️ Firestore series fetch notice (Quota/Connection): {e}")
 
-    series_data = snap.to_dict() or {}
-    title = series_data.get('title', {}).get('english') or series_data.get('title', {}).get('romaji') or f"Anime {anime_id}"
-    folder_id = series_data.get('rpm_folder_id')
-    magnet_link = series_data.get('custom_batch_url')
-    backup_magnets = [m for m in series_data.get('backup_magnets', []) if m]
+    title = payload.get("title") or series_data.get('title', {}).get('english') or series_data.get('title', {}).get('romaji') or f"Anime {anime_id}"
+    folder_id = payload.get("folder_id") or series_data.get('rpm_folder_id')
+    magnet_link = payload.get("custom_batch_url") or series_data.get('custom_batch_url')
+    backup_magnets = payload.get("backup_magnets") or [m for m in series_data.get('backup_magnets', []) if m]
+
+    if not magnet_link:
+        log(f"❌ No magnet link found for Anime {anime_id} (Ep {ep_num})")
+        return False
 
     log("==================================================")
     log(f"⚡ Cloud Single Episode Worker: {title} | EPISODE {ep_num}")
