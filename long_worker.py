@@ -740,8 +740,9 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
                         break
 
         # C. Process Subtitles BEFORE Uploading (Clean, extract, translate to Sinhala)
+        si_url, en_url, local_si_path = None, None, None
         if found_video_path and os.path.exists(found_video_path) and os.path.getsize(found_video_path) > 1024 * 1024:
-            si_url, en_url, local_si = process_episode_subtitles(ep_num, found_video_path, None, anime_id, title, ep_dir)
+            si_url, en_url, local_si_path = process_episode_subtitles(ep_num, found_video_path, None, anime_id, title, ep_dir)
 
             # Upload UNTOUCHED original video directly to RPMShare (Maximum hardware-accelerated transcoding speed!)
             log(f"🚀 Ep {ep_num} Uploading UNTOUCHED original video to RPMShare (Server 2)...")
