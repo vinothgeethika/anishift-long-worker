@@ -643,23 +643,24 @@ def delete_existing_sinhala_subs(video_id, api_token=None, base_url="https://rpm
     except Exception as e:
         print(f"[{log_prefix}] ⚠️ Error checking/deleting old subs on RPM: {e}", flush=True)
 
-def _perform_rpm_sub_attach(video_id, sub_bytes, sub_filename, api_token, remote_url=None, base_url="https://rpmshare.com/api/v1", log_prefix="SUB-ENGINE"):
+def _perform_rpm_sub_attach(video_id, sub_bytes, sub_filename, api_token, remote_url=None, base_url="https://rpmshare.com/api/v1", log_prefix="SUB-ENGINE", language="si", name="සිංහල"):
     """
     Attempts to attach the subtitle using direct file upload (PUT) first,
     and falls back to remote-subtitle (POST) if remote_url is provided.
     """
     headers = {'api-token': api_token}
     
-    # Clean previous Sinhala tracks first
-    delete_existing_sinhala_subs(video_id, api_token=api_token, base_url=base_url, log_prefix=log_prefix)
+    # Clean previous tracks of this language first
+    if language == 'si' or 'sinhala' in name.lower() or 'සිංහල' in name:
+        delete_existing_sinhala_subs(video_id, api_token=api_token, base_url=base_url, log_prefix=log_prefix)
 
     # 1. Try PUT /subtitle if sub_bytes are available
     if sub_bytes:
         for attempt in range(2):
             try:
                 url = f"{base_url}/video/manage/{video_id}/subtitle"
-                files = {'file': (sub_filename or 'Sinhala.srt', io.BytesIO(sub_bytes), 'application/x-subrip')}
-                data = {'language': 'si', 'name': 'සිංහල'}
+                files = {'file': (sub_filename or f'{name}.srt', io.BytesIO(sub_bytes), 'application/x-subrip')}
+                data = {'language': language, 'name': name}
                 r = requests.put(url, headers=headers, files=files, data=data, timeout=40)
                 if r.status_code in [200, 201]:
                     return True, r.text
@@ -676,8 +677,8 @@ def _perform_rpm_sub_attach(video_id, sub_bytes, sub_filename, api_token, remote
                 url_remote = f"{base_url}/video/manage/{video_id}/remote-subtitle"
                 headers_json = {'api-token': api_token, 'Content-Type': 'application/json'}
                 payload = {
-                    'language': 'si',
-                    'name': 'සිංහල',
+                    'language': language,
+                    'name': name,
                     'url': remote_url,
                     'type': 'srt'
                 }
@@ -692,9 +693,9 @@ def _perform_rpm_sub_attach(video_id, sub_bytes, sub_filename, api_token, remote
 
     return False, None
 
-def upload_sub_to_rpm(video_id, sub_file=None, api_token=None, remote_url=None, base_url="https://rpmshare.com/api/v1", background_if_pending=True, log_prefix="SUB-ENGINE"):
+def upload_sub_to_rpm(video_id, sub_file=None, api_token=None, remote_url=None, base_url="https://rpmshare.com/api/v1", background_if_pending=True, log_prefix="SUB-ENGINE", language="si", name="සිංහල"):
     """
-    Uploads/attaches a Sinhala subtitle track ('සිංහල') to an RPM video.
+    Uploads/attaches a subtitle track (e.g. 'සිංහල' or 'English') to an RPM video.
     If the video is still transcoding (status == 'Pending' or 'Processing'),
     it launches a background daemon worker to automatically poll and attach
     the subtitle the moment the video transitions to 'Active'.
@@ -706,7 +707,7 @@ def upload_sub_to_rpm(video_id, sub_file=None, api_token=None, remote_url=None, 
         api_token = os.getenv("RPMSHARE_API_TOKEN")
 
     sub_bytes = None
-    sub_filename = 'Sinhala.srt'
+    sub_filename = f'{name}.srt'
     if sub_file:
         if isinstance(sub_file, (bytes, bytearray)):
             sub_bytes = bytes(sub_file)
@@ -726,9 +727,9 @@ def upload_sub_to_rpm(video_id, sub_file=None, api_token=None, remote_url=None, 
 
     # 1. If video is already Active on RPM, attach immediately!
     if status == 'Active':
-        ok, _ = _perform_rpm_sub_attach(video_id, sub_bytes, sub_filename, api_token, remote_url=remote_url, base_url=base_url, log_prefix=log_prefix)
+        ok, _ = _perform_rpm_sub_attach(video_id, sub_bytes, sub_filename, api_token, remote_url=remote_url, base_url=base_url, log_prefix=log_prefix, language=language, name=name)
         if ok:
-            print(f"[{log_prefix}] 🎬 ✅ Attached Sinhala Subtitle to RPM Player: Video {video_id}", flush=True)
+            print(f"[{log_prefix}] 🎬 ✅ Attached {name} Subtitle to RPM Player: Video {video_id}", flush=True)
             return True
 
     # 2. If video is still transcoding (Pending / Processing), queue background worker
