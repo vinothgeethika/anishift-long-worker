@@ -643,11 +643,13 @@ def process_episode_subtitles(ep_num, video_path, video_id, anime_id, title, wor
                 clear_missing_sub_alert(rtdb, anime_id, ep_num)
                 log(f"🎉 Ep {ep_num} Sinhala Sub Attached to RPM & GitHub: {si_url}")
 
+    local_en_path = None
     # Process English or other source track for Sinhala translation
     if other_src:
         try:
             en_processed = process_english_sub(other_src, log_prefix=f"[{WORKER_ID} Ep {ep_num}]")
             target_en = en_processed if en_processed else other_src
+            local_en_path = target_en
             en_url = upload_to_github_release(target_en, asset_name="English.srt", release_context=rel_ctx)
             if en_url:
                 log(f"✅ Ep {ep_num} English Sub Online: {en_url}")
@@ -680,7 +682,7 @@ def process_episode_subtitles(ep_num, video_path, video_id, anime_id, title, wor
         log(f"⚠️ Ep {ep_num} No Sinhala Sub generated. Alerting Admin Panel.")
         push_missing_sub_alert(rtdb, anime_id, title, ep_num, video_id, 2)
 
-    return si_url, en_url, local_si_path
+    return si_url, en_url, local_si_path, local_en_path
 
 # ==========================================
 # ⚡ 5. PARALLEL SINGLE-EPISODE WORKER
@@ -740,9 +742,9 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
                         break
 
         # C. Process Subtitles BEFORE Uploading (Clean, extract, translate to Sinhala)
-        si_url, en_url, local_si_path = None, None, None
+        si_url, en_url, local_si_path, local_en_path = None, None, None, None
         if found_video_path and os.path.exists(found_video_path) and os.path.getsize(found_video_path) > 1024 * 1024:
-            si_url, en_url, local_si_path = process_episode_subtitles(ep_num, found_video_path, None, anime_id, title, ep_dir)
+            si_url, en_url, local_si_path, local_en_path = process_episode_subtitles(ep_num, found_video_path, None, anime_id, title, ep_dir)
 
             # Upload UNTOUCHED original video directly to RPMShare (Maximum hardware-accelerated transcoding speed!)
             log(f"🚀 Ep {ep_num} Uploading UNTOUCHED original video to RPMShare (Server 2)...")
@@ -795,26 +797,45 @@ def process_single_episode(ep_num, main_torrent_file, main_file_map, backup_maps
             except Exception:
                 pass
 
-            # Wait for RPMShare Active status and attach Sinhala subtitle via official API ('සිංහල')
-            if si_url or (local_si_path and os.path.exists(local_si_path)):
-                log(f"⏳ Ep {ep_num} Waiting for RPMShare video {video_id} to become 'Active' to attach 'සිංහල' subtitle...")
+            # Wait for RPMShare Active status and attach English & Sinhala subtitles via official API
+            if si_url or local_si_path or en_url or local_en_path:
+                log(f"⏳ Ep {ep_num} Waiting for RPMShare video {video_id} to become 'Active' to attach subtitles...")
                 for attempt in range(1, 121):  # Poll every 20s up to 40 minutes
                     time.sleep(20)
                     st = check_rpm_video_status(video_id, api_token=API_TOKEN_2)
                     if st == 'Active':
-                        log(f"🎬 Ep {ep_num} Video {video_id} is now Active! Attaching 'සිංහල' subtitle via API...")
-                        delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
-                        attached = upload_sub_to_rpm(
-                            video_id,
-                            sub_file=local_si_path if (local_si_path and os.path.exists(local_si_path)) else None,
-                            api_token=API_TOKEN_2,
-                            remote_url=si_url,
-                            background_if_pending=False,
-                            log_prefix=f"[{WORKER_ID} Ep {ep_num}]"
-                        )
-                        if attached:
-                            clear_missing_sub_alert(rtdb, anime_id, ep_num)
-                            log(f"🎉 Ep {ep_num} Sinhala Subtitle 100% attached to RPM Player as 'සිංහල'!")
+                        log(f"🎬 Ep {ep_num} Video {video_id} is now Active! Attaching subtitles via API...")
+
+                        # 1. Attach English Subtitle
+                        if en_url or (local_en_path and os.path.exists(local_en_path)):
+                            upload_sub_to_rpm(
+                                video_id,
+                                sub_file=local_en_path if (local_en_path and os.path.exists(local_en_path)) else None,
+                                api_token=API_TOKEN_2,
+                                remote_url=en_url,
+                                background_if_pending=False,
+                                log_prefix=f"[{WORKER_ID} Ep {ep_num}]",
+                                language="en",
+                                name="English"
+                            )
+                            log(f"🎉 Ep {ep_num} English Subtitle attached to RPM Player as 'English'!")
+
+                        # 2. Attach Sinhala Subtitle
+                        if si_url or (local_si_path and os.path.exists(local_si_path)):
+                            delete_existing_sinhala_subs(video_id, api_token=API_TOKEN_2)
+                            attached = upload_sub_to_rpm(
+                                video_id,
+                                sub_file=local_si_path if (local_si_path and os.path.exists(local_si_path)) else None,
+                                api_token=API_TOKEN_2,
+                                remote_url=si_url,
+                                background_if_pending=False,
+                                log_prefix=f"[{WORKER_ID} Ep {ep_num}]",
+                                language="si",
+                                name="සිංහල"
+                            )
+                            if attached:
+                                clear_missing_sub_alert(rtdb, anime_id, ep_num)
+                                log(f"🎉 Ep {ep_num} Sinhala Subtitle 100% attached to RPM Player as 'සිංහල'!")
                         break
                     elif attempt % 6 == 0:
                         log(f"   ⏳ Ep {ep_num} RPM Transcoding in progress... ({attempt * 20}s elapsed, status: {st})")
