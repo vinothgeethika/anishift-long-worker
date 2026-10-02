@@ -69,14 +69,24 @@ def has_letters(text):
 
 def clean_vtt_tags(text):
     if not text: return ""
-    text = re.sub(r'\{.*?\}', '', text).replace('\\h', ' ')
-    return re.sub(r'<[^>]+>', '', text).strip()
+    text = re.sub(r'\{.*?\}', '', text).replace('\\h', ' ').replace('\\N', ' ').replace('\\n', ' ')
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'[♪♫♩♬]+', '', text)
+    return re.sub(r'\s+', ' ', text).strip()
 
 def is_garbage_sub(text):
     if not text: return True
-    if re.search(r'\\pos\(|\\c&H|\\alpha|\\t\(|\\fad\(|\\an\d', text): return True
-    cl = re.sub(r'<[^>]+>', '', re.sub(r'\{.*?\}', '', text)).strip()
-    if re.match(r'^m\s+-?\d+(?:\.\d+)?\s+-?\d+(?:\.\d+)?\s+(?:l|b|s|c|m)\s+', cl): return True
+    # Strip ASS tags {...} and HTML tags <...>
+    cl = re.sub(r'<[^>]+>', '', re.sub(r'\{.*?\}', '', str(text))).replace('\\h', ' ').replace('\\N', ' ').replace('\\n', ' ').strip()
+    cl = re.sub(r'[♪♫♩♬]+', '', cl).strip()
+    if not cl:
+        return True  # Empty or only contained styling/notes
+    # Detect ASS drawing mode / vector shapes (e.g. m 0 0 l 10 10...)
+    if re.match(r'^m\s+-?\d+(?:\.\d+)?\s+-?\d+(?:\.\d+)?\s+(?:l|b|s|c|m)\s+', cl):
+        return True
+    # Check if there is actual dialogue text (letters or digits in any supported script)
+    if not re.search(r'[a-zA-Z0-9\u0D80-\u0DFF\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]', cl):
+        return True
     return False
 
 def detect_encoding(file_path):
@@ -228,7 +238,8 @@ def clean_sub_events(subs):
         txt = clean_vtt_tags(e.text)
         t_low = txt.lower()
 
-        if any(x in t_low for x in BAD_WORDS) or len(txt) > 250 or len(txt) < 2 or '♪' in txt or '♫' in txt:
+        # Reject ad words, excessively long non-dialogue blobs, or lines without letters/words
+        if any(x in t_low for x in BAD_WORDS) or len(txt) > 300 or not has_letters(txt):
             continue
 
         if txt == prev_text:
@@ -237,7 +248,8 @@ def clean_sub_events(subs):
             continue
 
         seen_texts_count[txt] = seen_texts_count.get(txt, 0) + 1
-        if len(txt) > 30 and seen_texts_count[txt] > 2:
+        # Suppress repeated ads/watermarks (>10 times) without dropping recurring dialogue lines
+        if len(txt) > 30 and seen_texts_count[txt] > 10:
             continue
 
         e.text = txt
