@@ -864,11 +864,11 @@ def resolve_total_episodes(s_data, s_ref=None):
 
     if s_ref:
         try:
-            eps = list(s_ref.collection('episodes').select(['episodeNumber']).stream())
-            if eps:
-                nums = [int(e.to_dict().get('episodeNumber', 0)) for e in eps if e.to_dict().get('episodeNumber')]
-                if nums:
-                    return max(max(nums), len(eps))
+            last_ep = list(s_ref.collection('episodes').order_by('episodeNumber', direction=firestore.Query.DESCENDING).limit(1).stream())
+            if last_ep:
+                num = int(last_ep[0].to_dict().get('episodeNumber', 0))
+                if num > 0:
+                    return num
         except Exception:
             pass
 
